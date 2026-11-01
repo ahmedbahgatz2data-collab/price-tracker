@@ -35,21 +35,43 @@ object Checker {
         try {
             val html = PriceFetcher.fetchHtml(p.url)
             val price = PriceFetcher.extract(html, p.selector)
+            val title = if (p.nameAuto) PriceFetcher.title(html) else null
+
             if (price == null) {
-                Store.update(c, p.id) { it.copy(error = "ما قدرتش أستخرج السعر من الصفحة", lastChecked = now) }
+                Store.update(c, p.id) {
+                    it.copy(
+                        error = "ما قدرتش أستخرج السعر من الصفحة",
+                        lastChecked = now,
+                        name = title ?: it.name,
+                        nameAuto = if (title != null) false else it.nameAuto
+                    )
+                }
                 return
             }
+
+            val label = title ?: p.name
             val old = p.lastPrice
             val nid = p.id.hashCode()
             if (old != null && price != old) {
                 val arrow = if (price < old) "⬇️ نزل" else "⬆️ زاد"
-                Notifier.send(c, nid, "$arrow سعر ${p.name}", "من ${fmt(old)} إلى ${fmt(price)}", p.url)
+                Notifier.send(c, nid, "$arrow سعر $label", "من ${fmt(old)} إلى ${fmt(price)}", p.url)
             }
             val t = p.target
             if (t != null && price <= t && (old == null || old > t)) {
-                Notifier.send(c, nid + 1, "🎯 ${p.name} وصل لسعرك المستهدف", "السعر الآن ${fmt(price)}", p.url)
+                Notifier.send(c, nid + 1, "🎯 $label وصل لسعرك المستهدف", "السعر الآن ${fmt(price)}", p.url)
             }
-            Store.update(c, p.id) { it.copy(lastPrice = price, lastChecked = now, error = null) }
+
+            Store.update(c, p.id) { cur ->
+                val h = if (cur.history.lastOrNull() != price) (cur.history + price).takeLast(40) else cur.history
+                cur.copy(
+                    lastPrice = price,
+                    lastChecked = now,
+                    error = null,
+                    history = h,
+                    name = title ?: cur.name,
+                    nameAuto = if (title != null) false else cur.nameAuto
+                )
+            }
         } catch (e: Exception) {
             Store.update(c, p.id) { it.copy(error = e.message ?: "خطأ في الاتصال", lastChecked = now) }
         }

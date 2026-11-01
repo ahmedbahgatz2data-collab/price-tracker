@@ -12,7 +12,9 @@ data class Product(
     val target: Double?,
     val lastPrice: Double?,
     val lastChecked: Long?,
-    val error: String?
+    val error: String?,
+    val history: List<Double> = emptyList(),
+    val nameAuto: Boolean = false
 )
 
 object Store {
@@ -24,6 +26,11 @@ object Store {
         val out = ArrayList<Product>()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
+            val hist = ArrayList<Double>()
+            val ha = o.optJSONArray("history")
+            if (ha != null) {
+                for (j in 0 until ha.length()) hist.add(ha.getDouble(j))
+            }
             out.add(
                 Product(
                     id = o.getString("id"),
@@ -33,7 +40,9 @@ object Store {
                     target = if (o.isNull("target")) null else o.getDouble("target"),
                     lastPrice = if (o.isNull("lastPrice")) null else o.getDouble("lastPrice"),
                     lastChecked = if (o.isNull("lastChecked")) null else o.getLong("lastChecked"),
-                    error = if (o.isNull("error")) null else o.getString("error")
+                    error = if (o.isNull("error")) null else o.getString("error"),
+                    history = hist,
+                    nameAuto = o.optBoolean("nameAuto", false)
                 )
             )
         }
@@ -53,6 +62,10 @@ object Store {
             o.put("lastPrice", p.lastPrice ?: JSONObject.NULL)
             o.put("lastChecked", p.lastChecked ?: JSONObject.NULL)
             o.put("error", p.error ?: JSONObject.NULL)
+            val ha = JSONArray()
+            for (h in p.history) ha.put(h)
+            o.put("history", ha)
+            o.put("nameAuto", p.nameAuto)
             arr.put(o)
         }
         prefs(c).edit().putString("products", arr.toString()).apply()

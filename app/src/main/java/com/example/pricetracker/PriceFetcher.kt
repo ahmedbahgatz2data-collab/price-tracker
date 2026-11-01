@@ -65,6 +65,13 @@ object PriceFetcher {
         return null
     }
 
+    fun title(html: String): String? {
+        val doc = Jsoup.parse(html)
+        val og = doc.selectFirst("meta[property=\"og:title\"]")?.attr("content")?.trim()
+        val t = if (!og.isNullOrBlank()) og else doc.title().trim()
+        return t.takeIf { it.isNotBlank() }?.take(90)
+    }
+
     fun extract(html: String, selector: String?): Double? {
         val doc = Jsoup.parse(html)
 
