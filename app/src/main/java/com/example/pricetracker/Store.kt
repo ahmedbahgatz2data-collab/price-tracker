@@ -14,7 +14,9 @@ data class Product(
     val lastChecked: Long?,
     val error: String?,
     val history: List<Double> = emptyList(),
-    val nameAuto: Boolean = false
+    val nameAuto: Boolean = false,
+    val imageUrl: String? = null,
+    val status: String? = null
 )
 
 object Store {
@@ -42,7 +44,9 @@ object Store {
                     lastChecked = if (o.isNull("lastChecked")) null else o.getLong("lastChecked"),
                     error = if (o.isNull("error")) null else o.getString("error"),
                     history = hist,
-                    nameAuto = o.optBoolean("nameAuto", false)
+                    nameAuto = o.optBoolean("nameAuto", false),
+                    imageUrl = if (o.isNull("imageUrl")) null else o.getString("imageUrl"),
+                    status = if (o.isNull("status")) null else o.getString("status")
                 )
             )
         }
@@ -66,6 +70,8 @@ object Store {
             for (h in p.history) ha.put(h)
             o.put("history", ha)
             o.put("nameAuto", p.nameAuto)
+            o.put("imageUrl", p.imageUrl ?: JSONObject.NULL)
+            o.put("status", p.status ?: JSONObject.NULL)
             arr.put(o)
         }
         prefs(c).edit().putString("products", arr.toString()).apply()
@@ -77,6 +83,8 @@ object Store {
     }
 
     fun add(c: Context, p: Product) = mutate(c) { it + p }
+
+    fun addAll(c: Context, ps: List<Product>) = mutate(c) { it + ps }
 
     fun remove(c: Context, id: String) = mutate(c) { list -> list.filter { it.id != id } }
 

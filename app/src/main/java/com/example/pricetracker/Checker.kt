@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 const val CHECK_EVERY_MINUTES = 30L  // أندرويد لا يسمح بأقل من 15 دقيقة
+const val DELAY_BETWEEN_PRODUCTS_MS = 2500L  // فاصل بين كل منتج والتاني لتفادي الـ Throttle
 
 class PriceWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -23,8 +24,16 @@ class PriceWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
 }
 
 object Checker {
+    const val GONE = "الصفحة غير موجودة"
+
+    /** متزامن: لو فحصين اشتغلوا مع بعض، التاني يستنى الأول (عشان ما يتبعتش إشعار مرتين). */
+    @Synchronized
     fun checkAll(c: Context) {
-        for (p in Store.load(c)) check(c, p)
+        val list = Store.load(c)
+        for ((i, p) in list.withIndex()) {
+            if (i > 0) Thread.sleep(DELAY_BETWEEN_PRODUCTS_MS)
+            check(c, p)
+        }
     }
 
     private fun fmt(d: Double): String =
@@ -32,10 +41,21 @@ object Checker {
 
     fun check(c: Context, p: Product) {
         val now = System.currentTimeMillis()
+        val nid = p.id.hashCode()
         try {
             val html = PriceFetcher.fetchHtml(p.url)
             val price = PriceFetcher.extract(html, p.selector)
             val title = if (p.nameAuto) PriceFetcher.title(html) else null
+            val image = PriceFetcher.image(html, p.url) ?: p.imageUrl
+            val status = PriceFetcher.availability(html)
+            val label = title ?: p.name
+
+            // تغيّر الحالة (متوفر / نفد ...)
+            val oldStatus = p.status
+            if (status != null && oldStatus != null && status != oldStatus) {
+                Alerts.send(c, nid + 2, "🔔 حالة $label اتغيرت", "من $oldStatus إلى $status", p.url, image)
+            }
+            val newStatus = status ?: (if (oldStatus == GONE) null else oldStatus)
 
             if (price == null) {
                 Store.update(c, p.id) {
@@ -43,22 +63,22 @@ object Checker {
                         error = "ما قدرتش أستخرج السعر من الصفحة",
                         lastChecked = now,
                         name = title ?: it.name,
-                        nameAuto = if (title != null) false else it.nameAuto
+                        nameAuto = if (title != null) false else it.nameAuto,
+                        imageUrl = image,
+                        status = newStatus
                     )
                 }
                 return
             }
 
-            val label = title ?: p.name
             val old = p.lastPrice
-            val nid = p.id.hashCode()
             if (old != null && price != old) {
                 val arrow = if (price < old) "⬇️ نزل" else "⬆️ زاد"
-                Notifier.send(c, nid, "$arrow سعر $label", "من ${fmt(old)} إلى ${fmt(price)}", p.url)
+                Alerts.send(c, nid, "$arrow سعر $label", "من ${fmt(old)} إلى ${fmt(price)}", p.url, image)
             }
             val t = p.target
             if (t != null && price <= t && (old == null || old > t)) {
-                Notifier.send(c, nid + 1, "🎯 $label وصل لسعرك المستهدف", "السعر الآن ${fmt(price)}", p.url)
+                Alerts.send(c, nid + 1, "🎯 $label وصل لسعرك المستهدف", "السعر الآن ${fmt(price)}", p.url, image)
             }
 
             Store.update(c, p.id) { cur ->
@@ -69,11 +89,21 @@ object Checker {
                     error = null,
                     history = h,
                     name = title ?: cur.name,
-                    nameAuto = if (title != null) false else cur.nameAuto
+                    nameAuto = if (title != null) false else cur.nameAuto,
+                    imageUrl = image,
+                    status = newStatus
                 )
             }
         } catch (e: Exception) {
-            Store.update(c, p.id) { it.copy(error = e.message ?: "خطأ في الاتصال", lastChecked = now) }
+            val msg = e.message ?: "خطأ في الاتصال"
+            if (msg == "HTTP 404" || msg == "HTTP 410") {
+                if (p.lastPrice != null && p.status != GONE) {
+                    Alerts.send(c, nid + 2, "🔔 ${p.name}: الصفحة اتشالت", "الموقع رجّع $msg", p.url, p.imageUrl)
+                }
+                Store.update(c, p.id) { it.copy(error = msg, lastChecked = now, status = GONE) }
+            } else {
+                Store.update(c, p.id) { it.copy(error = msg, lastChecked = now) }
+            }
         }
     }
 }

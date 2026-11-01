@@ -39,6 +39,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import kotlin.math.abs
 
@@ -115,6 +122,7 @@ fun App(sharedUrl: String) {
     var deleteTarget by remember { mutableStateOf<Product?>(null) }
     var editTarget by remember { mutableStateOf<Product?>(null) }
     var topMenu by remember { mutableStateOf(false) }
+    var showTelegram by remember { mutableStateOf(false) }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
@@ -143,6 +151,13 @@ fun App(sharedUrl: String) {
                     Box {
                         TextButton(onClick = { topMenu = true }) { Text("⋮") }
                         DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("إشعارات تيليجرام") },
+                                onClick = {
+                                    topMenu = false
+                                    showTelegram = true
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("السماح بالعمل في الخلفية (البطارية)") },
                                 onClick = {
@@ -197,15 +212,20 @@ fun App(sharedUrl: String) {
                 showAdd = false
                 prefill = ""
             },
-            onAdd = { u, n, t, s ->
-                if (products.any { it.url == u }) {
-                    say("المنتج ده مضاف بالفعل")
-                } else {
-                    Store.add(
-                        ctx,
+            onAdd = { urls, n, t, s ->
+                val known = products.map { it.url.trimEnd('/') }.toMutableSet()
+                val fresh = ArrayList<Product>()
+                var dup = 0
+                val single = urls.size == 1 && n.isNotBlank()
+                for (u in urls) {
+                    if (!known.add(u.trimEnd('/'))) {
+                        dup++
+                        continue
+                    }
+                    fresh.add(
                         Product(
                             id = UUID.randomUUID().toString(),
-                            name = n.ifBlank { hostOf(u) },
+                            name = if (single) n else hostOf(u),
                             url = u,
                             selector = s.ifBlank { null },
                             target = t,
@@ -213,18 +233,29 @@ fun App(sharedUrl: String) {
                             lastChecked = null,
                             error = null,
                             history = emptyList(),
-                            nameAuto = n.isBlank()
+                            nameAuto = !single
                         )
                     )
+                }
+                if (fresh.isNotEmpty()) {
+                    Store.addAll(ctx, fresh)
                     products = Store.load(ctx)
                     checkNow(ctx)
-                    say("تمت الإضافة، جاري جلب السعر…")
                 }
+                say(
+                    when {
+                        fresh.isEmpty() -> "كل الروابط دي مضافة بالفعل"
+                        dup > 0 -> "تمت إضافة ${fresh.size} منتج، وتم تخطي $dup مكرر"
+                        else -> "تمت إضافة ${fresh.size} منتج، جاري جلب الأسعار…"
+                    }
+                )
                 showAdd = false
                 prefill = ""
             }
         )
     }
+
+    if (showTelegram) TelegramDialog { showTelegram = false }
 
     deleteTarget?.let { p ->
         AlertDialog(
@@ -274,73 +305,106 @@ fun App(sharedUrl: String) {
 fun AddProductDialog(
     initialUrl: String,
     onDismiss: () -> Unit,
-    onAdd: (String, String, Double?, String) -> Unit
+    onAdd: (List<String>, String, Double?, String) -> Unit
 ) {
     val clip = LocalClipboardManager.current
+    var bulk by remember { mutableStateOf(false) }
     var url by remember { mutableStateOf(initialUrl) }
+    var bulkText by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var target by remember { mutableStateOf("") }
     var selector by remember { mutableStateOf("") }
     var advanced by remember { mutableStateOf(false) }
 
+    val urlRegex = remember { Regex("https?://[^\\s,;]+") }
+    val bulkUrls = remember(bulkText) { urlRegex.findAll(bulkText).map { it.value }.distinct().toList() }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("إضافة منتج") },
+        title = { Text(if (bulk) "إضافة عدة منتجات" else "إضافة منتج") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it },
-                    label = { Text("رابط المنتج") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextButton(onClick = {
-                    val t = clip.getText()?.text?.trim() ?: ""
-                    if (t.startsWith("http")) url = t
-                }) { Text("لصق من الحافظة") }
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("الاسم (اختياري، وإلا هيتجاب من الصفحة)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = target,
-                    onValueChange = { target = it },
-                    label = { Text("نبّهني لو السعر وصل لـ (اختياري)") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextButton(onClick = { advanced = !advanced }) {
-                    Text(if (advanced) "إخفاء الخيارات المتقدمة" else "خيارات متقدمة")
+                TextButton(onClick = { bulk = !bulk }) {
+                    Text(if (bulk) "الرجوع لإضافة رابط واحد" else "إضافة عدة روابط مرة واحدة")
                 }
-                if (advanced) {
+                if (bulk) {
                     OutlinedTextField(
-                        value = selector,
-                        onValueChange = { selector = it },
-                        label = { Text("CSS selector للسعر") },
+                        value = bulkText,
+                        onValueChange = { bulkText = it },
+                        label = { Text("الصق الروابط (كل رابط في سطر)") },
+                        minLines = 4,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    TextButton(onClick = {
+                        val t = clip.getText()?.text ?: ""
+                        if (t.isNotBlank()) {
+                            bulkText = if (bulkText.isBlank()) t else bulkText.trimEnd() + "\n" + t
+                        }
+                    }) { Text("لصق من الحافظة") }
+                    Text(
+                        "تم التعرف على ${bulkUrls.size} رابط",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = url,
+                        onValueChange = { url = it },
+                        label = { Text("رابط المنتج") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    TextButton(onClick = {
+                        val t = clip.getText()?.text?.trim() ?: ""
+                        if (t.startsWith("http")) url = t
+                    }) { Text("لصق من الحافظة") }
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("الاسم (اختياري، وإلا هيتجاب من الصفحة)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = target,
+                        onValueChange = { target = it },
+                        label = { Text("نبّهني لو السعر وصل لـ (اختياري)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    TextButton(onClick = { advanced = !advanced }) {
+                        Text(if (advanced) "إخفاء الخيارات المتقدمة" else "خيارات متقدمة")
+                    }
+                    if (advanced) {
+                        OutlinedTextField(
+                            value = selector,
+                            onValueChange = { selector = it },
+                            label = { Text("CSS selector للسعر") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = url.trim().startsWith("http"),
+                enabled = if (bulk) bulkUrls.isNotEmpty() else url.trim().startsWith("http"),
                 onClick = {
-                    onAdd(
-                        url.trim(),
-                        name.trim(),
-                        target.trim().replace(",", ".").toDoubleOrNull(),
-                        selector.trim()
-                    )
+                    if (bulk) {
+                        onAdd(bulkUrls, "", null, "")
+                    } else {
+                        onAdd(
+                            listOf(url.trim()),
+                            name.trim(),
+                            target.trim().replace(",", ".").toDoubleOrNull(),
+                            selector.trim()
+                        )
+                    }
                 }
-            ) { Text("إضافة") }
+            ) { Text(if (bulk) "إضافة ${bulkUrls.size}" else "إضافة") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
     )
@@ -378,6 +442,18 @@ fun ProductCard(p: Product, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: ()
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.clickable { onOpen() }.padding(16.dp)) {
             Row(verticalAlignment = Alignment.Top) {
+                if (!p.imageUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = p.imageUrl,
+                        contentDescription = p.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .size(84.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         p.name,
@@ -390,6 +466,26 @@ fun ProductCard(p: Product, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: ()
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    if (price == null) {
+                        if (p.error == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        Text(
+                            "${fmtPrice(price)} $CURRENCY",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (prev != null) {
+                            val diff = price - prev
+                            val pct = abs(diff) / prev * 100
+                            Text(
+                                (if (diff < 0) "⬇ " else "⬆ ") + fmtPrice(abs(diff)) + " (" + "%.1f".format(pct) + "%)",
+                                color = if (diff < 0) GreenColor else MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Medium,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
                 }
                 Box {
                     TextButton(onClick = { menu = true }) { Text("⋮") }
@@ -401,49 +497,41 @@ fun ProductCard(p: Product, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: ()
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            if (price != null && p.history.size >= 2) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Sparkline(
+                    points = p.history,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.fillMaxWidth().height(40.dp)
+                )
+            }
 
-            if (price == null) {
-                if (p.error == null) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            } else {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        "${fmtPrice(price)} $CURRENCY",
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    if (prev != null) {
-                        val diff = price - prev
-                        val pct = abs(diff) / prev * 100
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            (if (diff < 0) "⬇ " else "⬆ ") + fmtPrice(abs(diff)) + " (" + "%.1f".format(pct) + "%)",
-                            color = if (diff < 0) GreenColor else MaterialTheme.colorScheme.error,
-                            fontWeight = FontWeight.Medium,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-                if (p.history.size >= 2) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Sparkline(
-                        points = p.history,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.fillMaxWidth().height(40.dp)
-                    )
-                }
-                val info = ArrayList<String>()
-                if (p.history.size >= 2 && low != null) info.add("أقل سعر: ${fmtPrice(low)}")
-                val t = p.target
-                if (t != null) info.add("الهدف: ${fmtPrice(t)}")
-                if (info.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        info.joinToString("  •  "),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            val info = ArrayList<String>()
+            if (p.history.size >= 2 && low != null) info.add("أقل سعر: ${fmtPrice(low)}")
+            val t = p.target
+            if (t != null) info.add("الهدف: ${fmtPrice(t)}")
+            if (info.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    info.joinToString("  •  "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            val st = p.status
+            if (st != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "الحالة: $st",
+                    color = when (st) {
+                        "متوفر" -> GreenColor
+                        "نفد", "متوقف", "الصفحة غير موجودة" -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontWeight = FontWeight.Medium,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
 
             val err = p.error
@@ -468,4 +556,94 @@ fun ProductCard(p: Product, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: ()
             }
         }
     }
+}
+
+@Composable
+fun TelegramDialog(onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var token by remember { mutableStateOf(Prefs.token(ctx)) }
+    var chats by remember { mutableStateOf(Prefs.chatIds(ctx).joinToString(", ")) }
+    var msg by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("إشعارات تيليجرام") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "1) في تيليجرام افتح @BotFather واكتب /newbot واتبع الخطوات، وانسخ التوكن (أو استخدم توكن بوت عندك).\n" +
+                        "2) كل شخص عايز يستلم الإشعارات يفتح البوت ويكتب له أي رسالة (/start).\n" +
+                        "3) الصق التوكن، واضغط «اكتشاف Chat IDs»، ثم «رسالة تجربة»، ثم «حفظ».\n" +
+                        "تقدر كمان تكتب الـ Chat IDs بإيدك مفصولة بفاصلة.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    label = { Text("Bot Token") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = chats,
+                    onValueChange = { chats = it },
+                    label = { Text("Chat IDs (افصل بينهم بفاصلة)") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedButton(
+                    enabled = !busy && token.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        msg = "جاري البحث…"
+                        val t = token.trim()
+                        scope.launch {
+                            val ids = withContext(Dispatchers.IO) { Telegram.detectChatIds(t) }
+                            if (ids.isNotEmpty()) {
+                                val cur = Prefs.parseIds(chats)
+                                chats = (cur + ids.filter { it !in cur }).joinToString(", ")
+                                msg = "تم العثور على ${ids.size} محادثة ✅"
+                            } else {
+                                msg = "ما لقيتش رسائل. خلّي الشخص يبعت رسالة للبوت وجرّب تاني. " +
+                                    "(لو نفس البوت متربط بموقع بـ webhook، اكتب الـ Chat IDs بإيدك.)"
+                            }
+                            busy = false
+                        }
+                    }
+                ) { Text("اكتشاف Chat IDs") }
+                OutlinedButton(
+                    enabled = !busy && token.isNotBlank() && Prefs.parseIds(chats).isNotEmpty(),
+                    onClick = {
+                        busy = true
+                        msg = "جاري الإرسال…"
+                        val t = token.trim()
+                        val list = Prefs.parseIds(chats)
+                        scope.launch {
+                            val err = withContext(Dispatchers.IO) {
+                                Telegram.sendAll(t, list, "✅ تم ربط متابع الأسعار بتيليجرام")
+                            }
+                            msg = if (err == null) "تم الإرسال إلى ${list.size} محادثة ✅" else "فشل: $err"
+                            busy = false
+                        }
+                    }
+                ) { Text("رسالة تجربة لكل المحادثات") }
+                if (msg.isNotBlank()) {
+                    Text(msg, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                Prefs.saveTelegram(ctx, token.trim(), Prefs.parseIds(chats).joinToString(","))
+                onDismiss()
+            }) { Text("حفظ") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
+    )
 }
